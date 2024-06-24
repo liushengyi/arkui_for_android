@@ -28,6 +28,9 @@ template("ace_android_jni_source_set") {
       "$ace_root/adapter/android/entrance/java/jni/window_view_jni.cpp",
     ]
 
+    include_dirs =
+        [ "//foundation/graphic/graphic_surface/interfaces/inner_api/surface" ]
+
     deps = [ "$ace_root/frameworks/core/components/theme:build_theme_code" ]
 
     if (ace_use_new_skia) {
@@ -79,8 +82,10 @@ template("ace_common_jni_source_set") {
       "$ace_root/adapter/android/entrance/java/jni/pack_asset_provider.cpp",
       "$ace_root/adapter/android/entrance/java/jni/subwindow_manager_jni.cpp",
       "$ace_root/adapter/android/entrance/java/jni/touch_event.cpp",
+      "$ace_root/adapter/android/entrance/java/jni/touch_event_convertor.cpp",
       "$ace_root/adapter/android/entrance/java/jni/udmf/udmf_impl.cpp",
       "$ace_root/adapter/android/entrance/java/jni/web_adapter_jni.cpp",
+      "$ace_root/adapter/android/entrance/java/jni/xcollie/xcollieInterface_impl.cpp",
     ]
 
     include_dirs = [
@@ -89,6 +94,8 @@ template("ace_common_jni_source_set") {
       "//foundation/appframework/window_manager/interfaces/innerkits/dm",
       "//foundation/appframework/window_manager/dm/include",
       "//foundation/appframework/window_manager/utils/include",
+      "//foundation/graphic/graphic_surface/interfaces/inner_api/surface",
+      "//base/hiviewdfx/hilog/interfaces/native/innerkits/include",
     ]
 
     if (defined(config.use_curl_download) && config.use_curl_download) {

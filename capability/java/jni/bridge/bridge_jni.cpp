@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Huawei Device Co., Ltd.
+ * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -64,7 +64,7 @@ static const JNINativeMethod METHODS[] = {
         reinterpret_cast<void *>(&BridgeJni::PlatformSendMethodResultBinary)
     },
     {
-        "nativeplatformCallMethodBinary",
+        "nativePlatformCallMethodBinary",
         "(Ljava/lang/String;Ljava/lang/String;Ljava/nio/ByteBuffer;I)V",
         reinterpret_cast<void *>(&BridgeJni::PlatformCallMethodBinary)
     }
@@ -100,19 +100,19 @@ struct {
     jmethodID JSSendMethodResultBinaryJni_;
 } g_pluginClass;
 
-std::unordered_map<jint, jobject> g_jobjects;
+std::unordered_map<jint, JniEnvironment::JavaGlobalRef> g_jobjects;
 std::mutex g_bridgeJniLock;
 }  // namespace
 
 jobject GetJObjectByInstanceId(const int32_t instanceId)
 {
     std::lock_guard<std::mutex> lock(g_bridgeJniLock);
-    auto jobject = g_jobjects.find(instanceId);
-    if (jobject == g_jobjects.end()) {
-        LOGE("The jobject not found.");
+    auto finder = g_jobjects.find(instanceId);
+    if (finder == g_jobjects.end()) {
+        LOGE("BridgeJobject is not exist.");
         return nullptr;
     }
-    return jobject->second;
+    return finder->second.get();
 }
 
 RefPtr<TaskExecutor> BridgeJni::GetPlatformTaskExecutor(int32_t instanceId)
@@ -184,11 +184,7 @@ void BridgeJni::NativeInit(JNIEnv *env, jobject jobj, jint instanceId)
 
     auto id = static_cast<int32_t>(instanceId);
     std::lock_guard<std::mutex> lock(g_bridgeJniLock);
-    auto result = g_jobjects.try_emplace(id, env->NewGlobalRef(jobj));
-    if (!result.second) {
-        LOGE("The native jobject already exist.");
-        return;
-    }
+    g_jobjects.emplace(id, JniEnvironment::MakeJavaGlobalRef(JniEnvironment::GetInstance().GetJniEnv(), jobj));
 
     jclass cls = env->GetObjectClass(jobj);
     if (cls == nullptr) {
@@ -273,7 +269,7 @@ void BridgeJni::PlatformSendMethodResult(JNIEnv *env, jobject jobj,
     auto task = [bridgeName, methodName, result, instanceId] {
         BridgeManager::PlatformSendMethodResult(instanceId, bridgeName, methodName, result);
     };
-    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformSendMethodResult");
 }
 
 void BridgeJni::PlatformCallMethod(JNIEnv *env, jobject jobj,
@@ -312,7 +308,7 @@ void BridgeJni::PlatformCallMethod(JNIEnv *env, jobject jobj,
     auto task = [callBridgeName, callMethodName, callParam, instanceId] {
         BridgeManager::PlatformCallMethod(instanceId, callBridgeName, callMethodName, callParam);
     };
-    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformCallMethod");
 }
 
 void BridgeJni::JSSendMethodResultJni(const int32_t instanceId, const std::string& bridgeName,
@@ -396,7 +392,7 @@ void BridgeJni::PlatformSendMessageResponse(JNIEnv *env, jobject jobj,
     auto task = [bridgeName, data, instanceId] {
         BridgeManager::PlatformSendMessageResponse(instanceId, bridgeName, data);
     };
-    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformSendMessageResponse");
 }
 
 void BridgeJni::PlatformSendMessage(JNIEnv *env, jobject jobj, jstring jBridgeName, jstring jData, jint instanceId)
@@ -424,7 +420,7 @@ void BridgeJni::PlatformSendMessage(JNIEnv *env, jobject jobj, jstring jBridgeNa
     auto task = [bridgeName, data, instanceId] {
         BridgeManager::PlatformSendMessage(instanceId, bridgeName, data);
     };
-    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformSendMessage");
 }
 
 void BridgeJni::JSSendMessageResponseJni(const int32_t instanceId,
@@ -538,7 +534,7 @@ void BridgeJni::PlatformSendMethodResultBinary(JNIEnv *env, jobject jobj, jstrin
         BridgeManager::PlatformSendMethodResultBinary(instanceId, bridgeName, methodName,
             jErrorCode, errorMessage, std::move(mapping));
     };
-    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformSendMethodResultBinary");
 }
 
 void BridgeJni::JSSendMessageBinaryJni(
@@ -588,7 +584,7 @@ void BridgeJni::PlatformSendMessageBinary(JNIEnv *env, jobject jobj,
         auto mapping = std::make_unique<BufferMapping>(buffer, bufferSize);
         BridgeManager::PlatformSendMessageBinary(instanceId, bridgeName, std::move(mapping));
     };
-    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+    taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformSendMessageBinary");
 }
 
 void BridgeJni::JSSendMethodResultBinaryJni(const int32_t instanceId, const std::string& bridgeName,
@@ -651,7 +647,7 @@ void BridgeJni::PlatformCallMethodBinary(JNIEnv *env, jobject jobj,
         auto task = [bridgeName, methodName, instanceId] {
             BridgeManager::PlatformCallMethodBinary(instanceId, bridgeName, methodName, nullptr);
         };
-        taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+        taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformCallMethodBinaryIf");
     } else {
         uint8_t* bufferAddress = (unsigned char *)env->GetDirectBufferAddress(jBuffer);
         size_t bufferSize = static_cast<size_t>(env->GetDirectBufferCapacity(jBuffer));
@@ -661,7 +657,12 @@ void BridgeJni::PlatformCallMethodBinary(JNIEnv *env, jobject jobj,
             auto mapping = std::make_unique<BufferMapping>(buffer, bufferSize);
             BridgeManager::PlatformCallMethodBinary(instanceId, bridgeName, methodName, std::move(mapping));
         };
-        taskExecutor->PostTask(task, TaskExecutor::TaskType::JS);
+        taskExecutor->PostTask(task, TaskExecutor::TaskType::JS, "ArkUI-XBridgeJniPlatformCallMethodBinaryElse");
     }
+}
+
+void BridgeJni::ReleaseInstance(int32_t instanceId)
+{
+    g_jobjects.erase(instanceId);
 }
 }  // namespace OHOS::Ace::Platform

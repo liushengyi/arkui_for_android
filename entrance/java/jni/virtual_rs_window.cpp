@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Huawei Device Co., Ltd.
+ * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -19,6 +19,7 @@
 #include <memory>
 
 #include "ability_context.h"
+#include "display_info_jni.h"
 #include "foundation/appframework/arkui/uicontent/ui_content.h"
 #include "hilog.h"
 #include "napi/native_api.h"
@@ -26,6 +27,7 @@
 #include "subwindow_manager_jni.h"
 #include "transaction/rs_interfaces.h"
 #include "window_view_adapter.h"
+#include "window_view_jni.h"
 
 #include "adapter/android/entrance/java/jni/ace_env_jni.h"
 #include "adapter/android/entrance/java/jni/jni_environment.h"
@@ -36,6 +38,11 @@
 using namespace OHOS::Ace::Platform;
 
 namespace OHOS::Rosen {
+namespace {
+static constexpr Rect EMPTY_RECT = {0, 0, 0, 0};
+static constexpr int32_t ORIENTATION_LANDSCAPE = 0;
+static constexpr int32_t ORIENTATION_PORTRAIT = 1;
+}  // namespace
 void DummyWindowRelease(Window* window)
 {
     window->DecStrongRef(window);
@@ -169,7 +176,12 @@ std::map<uint32_t, std::vector<std::shared_ptr<Window>>> Window::subWindowMap_;
 std::map<std::string, std::pair<uint32_t, std::shared_ptr<Window>>> Window::windowMap_;
 std::map<uint32_t, std::vector<sptr<IOccupiedAreaChangeListener>>> Window::occupiedAreaChangeListeners_;
 std::map<uint32_t, std::vector<sptr<IWindowLifeCycle>>> Window::lifecycleListeners_;
+std::map<uint32_t, std::vector<sptr<IWindowChangeListener>>> Window::windowChangeListeners_;
+std::map<uint32_t, std::vector<sptr<ITouchOutsideListener>>> Window::touchOutsideListeners_;
 std::recursive_mutex Window::globalMutex_;
+std::recursive_mutex g_sysBarPropMapMutex;
+uint32_t g_KeyboardHeight = 0;
+bool g_IsNavigationIndicatorShow = false;
 
 Window::Window(std::shared_ptr<AbilityRuntime::Platform::Context> context, uint32_t windowId)
     : context_(context), windowId_(windowId), brightness_(SubWindowManagerJni::GetAppScreenBrightness())
@@ -311,7 +323,6 @@ std::shared_ptr<Window> Window::CreateSubWindow(
 
         window->SetSubWindowView(env, view);
         window->CreateSurfaceNode(view);
-        LOGI("Window::CreateSubWindow: success");
 
         return window;
     }
@@ -333,8 +344,6 @@ WMError Window::Destroy()
     }
 
     NotifyBeforeDestroy(GetWindowName());
-
-    ClearListenersById(GetWindowId());
 
     // Remove subWindows of current window from subWindowMap_
     if (subWindowMap_.count(GetWindowId()) > 0) {
@@ -375,6 +384,8 @@ WMError Window::Destroy()
     }
 
     NotifyAfterBackground();
+
+    ClearListenersById(GetWindowId());
     return WMError::WM_OK;
 }
 
@@ -398,6 +409,20 @@ WMError Window::UnregisterOccupiedAreaChangeListener(const sptr<IOccupiedAreaCha
     return UnregisterListener(occupiedAreaChangeListeners_[GetWindowId()], listener);
 }
 
+WMError Window::RegisterWindowChangeListener(const sptr<IWindowChangeListener>& listener)
+{
+    LOGD("Start register");
+    std::lock_guard<std::recursive_mutex> lock(globalMutex_);
+    return RegisterListener(windowChangeListeners_[GetWindowId()], listener);
+}
+
+WMError Window::UnregisterWindowChangeListener(const sptr<IWindowChangeListener>& listener)
+{
+    LOGD("Start unregister");
+    std::lock_guard<std::recursive_mutex> lock(globalMutex_);
+    return UnregisterListener(windowChangeListeners_[GetWindowId()], listener);
+}
+
 std::vector<std::shared_ptr<Window>> Window::GetSubWindow(uint32_t parentId)
 {
     LOGI("Window::GetSubWindow called. parentId=%d", parentId);
@@ -409,7 +434,7 @@ std::vector<std::shared_ptr<Window>> Window::GetSubWindow(uint32_t parentId)
 
 std::shared_ptr<Window> Window::FindWindow(const std::string& name)
 {
-    LOGI("Window::GetSubWindow called. name=%s", name.c_str());
+    LOGI("Window::FindWindow called. name=%s", name.c_str());
     auto iter = windowMap_.find(name);
     if (iter == windowMap_.end()) {
         return nullptr;
@@ -477,6 +502,7 @@ WMError Window::MoveWindowTo(int32_t x, int32_t y)
     bool result = SubWindowManagerJni::MoveWindowTo(this->GetWindowName(), x, y);
 
     if (result) {
+        NotifySizeChange(rect_);
         return WMError::WM_OK;
     } else {
         return WMError::WM_ERROR_INVALID_WINDOW;
@@ -493,11 +519,10 @@ WMError Window::ResizeWindowTo(int32_t width, int32_t height)
 
     rect_.width_ = width;
     rect_.height_ = height;
-
     bool result = SubWindowManagerJni::ResizeWindowTo(this->GetWindowName(), width, height);
 
     if (result) {
-        LOGI("Window::ResizeWindowTo: success");
+        NotifySizeChange(rect_);
         return WMError::WM_OK;
     } else {
         LOGI("Window::ResizeWindowTo: failed");
@@ -528,7 +553,6 @@ WMError Window::SetBrightness(float brightness)
 
     brightness_ = brightness;
     if (result) {
-        LOGI("Window::SetBrightness: success");
         return WMError::WM_OK;
     } else {
         LOGI("Window::SetBrightness: failed");
@@ -542,7 +566,6 @@ WMError Window::SetKeepScreenOn(bool keepScreenOn)
     bool result = SubWindowManagerJni::SetKeepScreenOn(keepScreenOn);
 
     if (result) {
-        LOGI("Window::SetKeepScreenOn: success");
         return WMError::WM_OK;
     } else {
         LOGI("Window::SetKeepScreenOn: failed");
@@ -602,33 +625,24 @@ bool Window::IsKeepScreenOn()
 
 WMError Window::SetSystemBarProperty(WindowType type, const SystemBarProperty& property)
 {
-    LOGI("Window::SetSystemBarProperty called.");
-
     bool hide = !property.enable_;
     bool result = false;
 
     if (type == WindowType::WINDOW_TYPE_NAVIGATION_BAR) {
-        if (hide) {
-            result = SubWindowManagerJni::SetActionBarStatus(true);
-        } else {
-            result = SubWindowManagerJni::SetActionBarStatus(false);
-        }
-
+        result = SubWindowManagerJni::SetNavigationBarStatus(hide);
     } else if (type == WindowType::WINDOW_TYPE_STATUS_BAR) {
-        if (hide) {
-            result = SubWindowManagerJni::SetStatusBarStatus(true);
-        } else {
-            result = SubWindowManagerJni::SetStatusBarStatus(false);
-        }
+        result = SubWindowManagerJni::SetStatusBarStatus(hide);
+    } else {
+        LOGE("The WindowType is not set to SystemBarProperty. The WindowType is %{public}d", type);
     }
 
+    std::lock_guard<std::recursive_mutex> lock(g_sysBarPropMapMutex);
     sysBarPropMap_[type] = property;
 
     if (result) {
-        LOGI("Window::SetSystemBarProperty: success");
         return WMError::WM_OK;
     } else {
-        LOGI("Window::SetSystemBarProperty: failed");
+        LOGE("Window::SetSystemBarProperty: failed. The WindowType is %{public}d", type);
         return WMError::WM_ERROR_INVALID_WINDOW;
     }
 }
@@ -639,9 +653,7 @@ void Window::SetRequestedOrientation(Orientation orientation)
 
     bool result = SubWindowManagerJni::RequestOrientation(orientation);
 
-    if (result) {
-        LOGI("Window::SetRequestedOrientation: success");
-    } else {
+    if (!result) {
         LOGI("Window::SetRequestedOrientation: failed");
     }
 }
@@ -674,6 +686,20 @@ WMError Window::UnregisterLifeCycleListener(const sptr<IWindowLifeCycle>& listen
     LOGD("Start unregister");
     std::lock_guard<std::recursive_mutex> lock(globalMutex_);
     return UnregisterListener(lifecycleListeners_[GetWindowId()], listener);
+}
+
+WMError Window::RegisterTouchOutsideListener(const sptr<ITouchOutsideListener>& listener)
+{
+    LOGD("Start register TouchOutsideListener");
+    std::lock_guard<std::recursive_mutex> lock(globalMutex_);
+    return RegisterListener(touchOutsideListeners_[GetWindowId()], listener);
+}
+
+WMError Window::UnregisterTouchOutsideListener(const sptr<ITouchOutsideListener>& listener)
+{
+    LOGD("Start unregister TouchOutsideListener");
+    std::lock_guard<std::recursive_mutex> lock(globalMutex_);
+    return UnregisterListener(touchOutsideListeners_[GetWindowId()], listener);
 }
 
 template<typename T>
@@ -754,7 +780,6 @@ void Window::CreateSurfaceNode(void* nativeWindow)
 
     if (!uiContent_) {
         LOGW("Window Notify uiContent_ Surface Created, uiContent_ is nullptr, delay notify.");
-        delayNotifySurfaceCreated_ = true;
     } else {
         LOGI("Window Notify uiContent_ Surface Created");
         uiContent_->NotifySurfaceCreated();
@@ -763,6 +788,10 @@ void Window::CreateSurfaceNode(void* nativeWindow)
 
 void Window::NotifySurfaceChanged(int32_t width, int32_t height, float density)
 {
+    
+    rect_.width_ = width;
+    rect_.height_ = height;
+    NotifySizeChange(rect_);
     if (!surfaceNode_) {
         LOGE("Window Notify Surface Changed, surfaceNode_ is nullptr!");
         return;
@@ -773,11 +802,8 @@ void Window::NotifySurfaceChanged(int32_t width, int32_t height, float density)
     density_ = density;
     surfaceNode_->SetBoundsWidth(surfaceWidth_);
     surfaceNode_->SetBoundsHeight(surfaceHeight_);
-    rect_.width_ = width;
-    rect_.height_ = height;
     if (!uiContent_) {
         LOGW("Window Notify uiContent_ Surface Changed, uiContent_ is nullptr, delay notify.");
-        delayNotifySurfaceChanged_ = true;
     } else {
         Ace::ViewportConfig config;
         config.SetDensity(density_);
@@ -789,6 +815,7 @@ void Window::NotifySurfaceChanged(int32_t width, int32_t height, float density)
 
 void Window::NotifyKeyboardHeightChanged(int32_t height)
 {
+    g_KeyboardHeight = height;
     auto occupiedAreaChangeListeners = GetListeners<IOccupiedAreaChangeListener>();
     for (auto& listener : occupiedAreaChangeListeners) {
         if (listener != nullptr) {
@@ -796,6 +823,31 @@ void Window::NotifyKeyboardHeightChanged(int32_t height)
             listener->OnSizeChange(rect, OccupiedAreaType::TYPE_INPUT);
         }
     }
+}
+
+void Window::NotifySizeChange(Rect rect)
+{
+    auto windowChangeListeners = GetListeners<IWindowChangeListener>();
+    for (auto& listener : windowChangeListeners) {
+        if (listener != nullptr) {
+            listener->OnSizeChange(rect);
+        }
+    }
+}
+
+void Window::NotifyTouchOutside()
+{
+    auto touchOutsideListeners = GetListeners<ITouchOutsideListener>();
+    for (auto& listener : touchOutsideListeners) {
+        if (listener != nullptr) {
+            listener->OnTouchOutside();
+        }
+    }
+}
+
+void Window::SubWindowHide()
+{
+    NotifyAfterBackground();
 }
 
 void Window::NotifySurfaceDestroyed()
@@ -818,10 +870,11 @@ void Window::WindowFocusChanged(bool hasWindowFocus)
         return;
     }
     if (hasWindowFocus) {
-        LOGI("Window: notify uiContent Focus");
+        LOGI("Window(%{public}s): notify uiContent Focus", GetWindowName().c_str());
         uiContent_->Focus();
         NotifyAfterActive();
         isForground_ = true;
+        isFocused_ = true;
 
         if (IsSubWindow() || subWindowMap_.count(GetWindowId()) == 0) {
             return;
@@ -833,10 +886,11 @@ void Window::WindowFocusChanged(bool hasWindowFocus)
             }
         }
     } else {
-        LOGI("Window: notify uiContent UnFocus");
+        LOGI("Window(%{public}s): notify uiContent UnFocus", GetWindowName().c_str());
         uiContent_->UnFocus();
         NotifyAfterInactive();
         isForground_ = false;
+        isFocused_ = false;
     }
 }
 
@@ -918,32 +972,26 @@ void Window::DelayNotifyUIContentIfNeeded()
         return;
     }
 
-    if (delayNotifySurfaceCreated_) {
-        LOGI("Window Delay Notify uiContent_ Surface Created");
-        uiContent_->NotifySurfaceCreated();
-        delayNotifySurfaceCreated_ = false;
-    }
+    LOGD("Window Delay Notify uiContent_ Surface Created");
+    uiContent_->NotifySurfaceCreated();
 
-    if (delayNotifySurfaceChanged_) {
-        LOGI("Window Delay Notify uiContent_ Surface Changed wh:[%{public}d, %{public}d]", surfaceWidth_,
-            surfaceHeight_);
-        Ace::ViewportConfig config;
-        config.SetDensity(density_);
-        config.SetSize(surfaceWidth_, surfaceHeight_);
-        config.SetOrientation(surfaceHeight_ >= surfaceWidth_ ? 0 : 1);
-        uiContent_->UpdateViewportConfig(config, WindowSizeChangeReason::RESIZE);
-        delayNotifySurfaceChanged_ = false;
-    }
+    LOGD("Window Delay Notify uiContent_ Surface Changed wh:[%{public}d, %{public}d]", surfaceWidth_,
+        surfaceHeight_);
+    Ace::ViewportConfig config;
+    config.SetDensity(density_);
+    config.SetSize(surfaceWidth_, surfaceHeight_);
+    config.SetOrientation(surfaceHeight_ >= surfaceWidth_ ? 0 : 1);
+    uiContent_->UpdateViewportConfig(config, WindowSizeChangeReason::RESIZE);
 
     if (delayNotifySurfaceDestroyed_) {
-        LOGI("Window Delay Notify uiContent_ Surface Destroyed");
+        LOGD("Window Delay Notify uiContent_ Surface Destroyed");
         uiContent_->NotifySurfaceDestroyed();
         delayNotifySurfaceDestroyed_ = false;
     }
 }
 
 WMError Window::SetUIContent(const std::string& contentInfo, NativeEngine* engine, napi_value storage,
-    bool isdistributed, AbilityRuntime::Platform::Ability* ability)
+    bool isdistributed, AbilityRuntime::Platform::Ability* ability, bool loadContentByName)
 {
     using namespace OHOS::Ace::Platform;
     (void)ability;
@@ -955,11 +1003,15 @@ WMError Window::SetUIContent(const std::string& contentInfo, NativeEngine* engin
     if (uiContent == nullptr) {
         return WMError::WM_ERROR_NULLPTR;
     }
-    uiContent->Initialize(this, contentInfo, storage);
+    if (loadContentByName) {
+        uiContent->InitializeByName(this, contentInfo, storage);
+    }else {
+        uiContent->Initialize(this, contentInfo, storage);
+    }
     // make uiContent available after Initialize/Restore
     uiContent_ = std::move(uiContent);
-    uiContent_->Foreground();
     DelayNotifyUIContentIfNeeded();
+    uiContent_->Foreground();
     return WMError::WM_OK;
 }
 
@@ -990,6 +1042,7 @@ void Window::SetSubWindowView(JNIEnv* env, jobject windowView)
     }
     windowView_ = env->NewGlobalRef(windowView);
     Ace::Platform::WindowViewJni::RegisterWindow(env, this, windowView);
+    SubWindowManagerJni::RegisterSubWindow(GetWindowName(), this);
 }
 
 void Window::ReleaseWindowView()
@@ -999,6 +1052,9 @@ void Window::ReleaseWindowView()
     }
     auto jniEnv = Ace::Platform::JniEnvironment::GetInstance().GetJniEnv();
     Ace::Platform::WindowViewJni::UnRegisterWindow(jniEnv.get(), windowView_);
+    if (IsSubWindow()) {
+        SubWindowManagerJni::UnregisterSubWindow(GetWindowName());
+    }
     Ace::Platform::JniEnvironment::DeleteJavaGlobalRef(windowView_);
     windowView_ = nullptr;
 }
@@ -1020,6 +1076,242 @@ void Window::SetUpThreadInfo()
         renderTid = tid;
         bool ret = AceEnvJni::SetThreadInfo(renderTid);
         LOGI("Window::SetUpThreadInfo tid:%{public}d ret:%{public}d.", renderTid, ret);
+    }
+}
+
+WMError Window::SetLayoutFullScreen(bool status)
+{
+    if (SubWindowManagerJni::SetWindowLayoutFullScreen(status)) {
+        return WMError::WM_OK;
+    } else {
+        LOGE("Window::SetLayoutFullScreen: failed");
+        return WMError::WM_ERROR_OPER_FULLSCREEN_FAILED;
+    }
+}
+
+WMError Window::SetSpecificBarProperty(WindowType type, const SystemBarProperty& property)
+{
+    bool hide = !property.enable_;
+    bool result = false;
+
+    if (type == WindowType::WINDOW_TYPE_STATUS_BAR) {
+        result = SubWindowManagerJni::SetStatusBarStatus(hide);
+    } else if (type == WindowType::WINDOW_TYPE_NAVIGATION_BAR) {
+        result = SubWindowManagerJni::SetNavigationBarStatus(hide);
+    } else if (type == WindowType::WINDOW_TYPE_NAVIGATION_INDICATOR) {
+        result = SubWindowManagerJni::SetNavigationIndicatorStatus(hide);
+        if (result) {
+            g_IsNavigationIndicatorShow = property.enable_;
+        }
+    } else {
+        LOGE("The WindowType is not set to SpecificBarProperty. The WindowType is %{public}d", type);
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(g_sysBarPropMapMutex);
+    sysBarPropMap_[type] = property;
+
+    if (result) {
+        return WMError::WM_OK;
+    } else {
+        LOGE("Window::SetSpecificBarProperty: failed. The WindowType is %{public}d", type);
+        return WMError::WM_ERROR_INVALID_WINDOW;
+    }
+}
+
+Rect Window::getTopRect(const Rect& SafeAreaRect)
+{
+    Rect rect = EMPTY_RECT;
+    auto displayWidth = DisplayInfoJni::getDisplayWidth();
+    auto statusBarHeight = SubWindowManagerJni::GetStatusBarHeight();
+    auto navBarHeight = SubWindowManagerJni::GetNavigationBarHeight();
+    auto sumHeight = SafeAreaRect.posY_ + SafeAreaRect.height_ + statusBarHeight + navBarHeight;
+    if (SafeAreaRect.posY_ > 0) {
+        rect.width_ = displayWidth;
+        rect.height_ = SafeAreaRect.posY_;
+    } else if (sumHeight == DisplayInfoJni::getDisplayHeight()) {
+        rect.width_ = displayWidth;
+        rect.height_ = statusBarHeight;
+    }
+    return rect;
+}
+
+Rect Window::getLeftRect(const Rect& SafeAreaRect)
+{
+    Rect rect = EMPTY_RECT;
+    if (SafeAreaRect.posX_ > 0) {
+        rect.width_ = SafeAreaRect.posX_;
+        rect.height_ = DisplayInfoJni::getDisplayHeight();
+    }
+    return rect;
+}
+
+Rect Window::getRightRect(const Rect& SafeAreaRect)
+{
+    Rect rect = EMPTY_RECT;
+    auto displayWidth = DisplayInfoJni::getDisplayWidth();
+    auto sumWidth = SafeAreaRect.posX_ + SafeAreaRect.width_;
+    if (sumWidth < displayWidth) {
+        rect.posX_ = sumWidth;
+        rect.width_ = displayWidth - sumWidth;
+        rect.height_ = DisplayInfoJni::getDisplayHeight();
+    }
+    return rect;
+}
+
+Rect Window::getBottomRect(const Rect& SafeAreaRect)
+{
+    Rect rect = EMPTY_RECT;
+    auto displayHeight = DisplayInfoJni::getDisplayHeight();
+    auto sumHeight = SafeAreaRect.posY_ + SafeAreaRect.height_;
+    if (sumHeight < displayHeight) {
+        rect.posY_ = sumHeight;
+        rect.width_ = surfaceWidth_;
+        rect.height_ = displayHeight - sumHeight;
+    }
+    return rect;
+}
+
+void Window::getCutoutRect(const Rect& SafeAreaRect, AvoidArea& avoidArea)
+{
+    auto cutoutBarHeight = SubWindowManagerJni::getCutoutBarHeight();
+    if (cutoutBarHeight == 0) {
+        return;
+    }
+    auto orientationType = SubWindowManagerJni::GetScreenOrientation();
+    if (orientationType == ORIENTATION_PORTRAIT) {
+        avoidArea.topRect_ = getTopRect(SafeAreaRect);
+    } else {
+        orientationType == ORIENTATION_LANDSCAPE ? avoidArea.leftRect_ = getLeftRect(SafeAreaRect)
+                                                 : avoidArea.rightRect_ = getRightRect(SafeAreaRect);
+    }
+}
+
+WMError Window::GetAvoidAreaByType(AvoidAreaType type, AvoidArea& avoidArea)
+{
+    avoidArea.topRect_ = EMPTY_RECT;
+    avoidArea.leftRect_ = EMPTY_RECT;
+    avoidArea.rightRect_ = EMPTY_RECT;
+    avoidArea.bottomRect_ = EMPTY_RECT;
+    auto WMErrorCode = WMError::WM_OK;
+    const Rect SafeAreaRect = SubWindowManagerJni::GetSafeArea();
+    auto NavigationIndicatorHeight = SubWindowManagerJni::GetNavigationIndicatorHeight();
+
+    switch (type) {
+        case AvoidAreaType::TYPE_SYSTEM:
+            avoidArea.topRect_ = getTopRect(SafeAreaRect);
+            avoidArea.leftRect_ = getLeftRect(SafeAreaRect);
+            avoidArea.rightRect_ = getRightRect(SafeAreaRect);
+            avoidArea.bottomRect_ = getBottomRect(SafeAreaRect);
+            break;
+        case AvoidAreaType::TYPE_CUTOUT:
+            getCutoutRect(SafeAreaRect, avoidArea);
+            break;
+        case AvoidAreaType::TYPE_SYSTEM_GESTURE:
+            break;
+        case AvoidAreaType::TYPE_KEYBOARD:
+            if (g_KeyboardHeight > 0) {
+                avoidArea.bottomRect_.posY_ = DisplayInfoJni::getDisplayHeight() - g_KeyboardHeight;
+                avoidArea.bottomRect_.width_ = surfaceWidth_;
+                avoidArea.bottomRect_.height_ = g_KeyboardHeight;
+            }
+            break;
+        case AvoidAreaType::TYPE_NAVIGATION_INDICATOR:
+            if (g_IsNavigationIndicatorShow && NavigationIndicatorHeight > 0) {
+                avoidArea.bottomRect_ = getBottomRect(SafeAreaRect);
+            }
+            break;
+        default:
+            LOGE("Window::GetAvoidAreaByType, Set Invalid AvoidAreaByType. The type is %{public}d", type);
+            WMErrorCode = WMError::WM_ERROR_INVALID_PARAM;
+            break;
+    }
+    return WMErrorCode;
+}
+
+WMError Window::Hide()
+{
+    LOGI("Window::Hide called.");
+    if (GetWindowName().empty()) {
+        LOGI("Window::Hide called failed due to null option");
+        return WMError::WM_ERROR_INVALID_WINDOW;
+    }
+
+    bool result = SubWindowManagerJni::Hide(GetWindowName());
+    if (result) {
+        NotifyAfterBackground();
+        return WMError::WM_OK;
+    } else {
+        return WMError::WM_ERROR_INVALID_WINDOW;
+    }
+}
+
+WMError Window::SetFocusable(bool isFocusable)
+{
+    LOGI("Window::SetFocusable called. isFocusable=%{public}d", isFocusable);
+    bool result = SubWindowManagerJni::SetFocusable(this->GetWindowName(), isFocusable);
+    if (result) {
+        LOGI("Window::SetFocusable: success");
+        return WMError::WM_OK;
+    } else {
+        LOGI("Window::SetFocusable: failed");
+        return WMError::WM_ERROR_INVALID_WINDOW;
+    }
+}
+
+WMError Window::SetTouchable(bool isTouchable)
+{
+    LOGI("Window::SetTouchable called. isTouchable=%{public}d", isTouchable);
+    bool result = SubWindowManagerJni::SetTouchable(GetWindowName(), isTouchable);
+    if (result) {
+        LOGI("Window::SetTouchable: success");
+        return WMError::WM_OK;
+    } else {
+        LOGI("Window::SetTouchable: failed");
+        return WMError::WM_ERROR_INVALID_WINDOW;
+    }
+}
+
+bool Window::RequestFocus()
+{
+    bool result = SubWindowManagerJni::RequestFocus(GetWindowName());
+    LOGI("Window::RequestFocus return %{public}d", result);
+    return result;
+}
+
+bool Window::IsFocused()
+{
+    LOGI("Window::IsFocused called(%{public}s). isFocused_=%{public}d", GetWindowName().c_str(), isFocused_);
+    return isFocused_;
+}
+
+WMError Window::SetTouchHotAreas(const std::vector<Rect>& rects)
+{
+    LOGI("Window::SetTouchHotAreas called");
+    if (rects.empty()) {
+        LOGI("rects is empty");
+        return WMError::WM_ERROR_INVALID_PARAM;
+    }
+
+    bool result = SubWindowManagerJni::SetTouchHotAreas(GetWindowName(), rects);
+    if (result) {
+        LOGI("Window::SetTouchable: success");
+        return WMError::WM_OK;
+    } else {
+        LOGI("Window::SetTouchable: failed");
+        return WMError::WM_ERROR_INVALID_WINDOW;
+    }
+}
+
+WMError Window::SetFullScreen(bool status)
+{
+    LOGI("Window::SetFullScreen called. status=%{public}d", status);
+    bool result = SubWindowManagerJni::SetFullScreen(GetWindowName(), status);
+    if (result) {
+        LOGI("Window::SetFullScreen: success");
+        return WMError::WM_OK;
+    } else {
+        LOGI("Window::SetFullScreen: failed");
+        return WMError::WM_ERROR_INVALID_WINDOW;
     }
 }
 

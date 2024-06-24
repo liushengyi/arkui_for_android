@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Huawei Device Co., Ltd.
+ * Copyright (c) 2024 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -13,13 +13,11 @@
  * limitations under the License.
  */
 
-#include "base/subwindow/subwindow.h"
+#include "frameworks/core/interfaces/native/node/touch_event_convertor.h"
 
-namespace OHOS::Ace {
-
-RefPtr<Subwindow> Subwindow::CreateSubwindow(int32_t instanceId)
+namespace OHOS::Ace::NG {
+TouchEvent ConvertToTouchEvent(const std::shared_ptr<MMI::PointerEvent>& srcPointerEvent)
 {
-    return nullptr;
+    return {};
 }
-
-} // namespace OHOS::Ace
+}

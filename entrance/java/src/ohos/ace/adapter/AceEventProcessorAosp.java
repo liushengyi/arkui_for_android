@@ -28,7 +28,7 @@ import java.nio.ByteOrder;
  * @since 1
  */
 public class AceEventProcessorAosp {
-    private static final int PONITER_FIELD_COUNT = 10;
+    private static final int PONITER_FIELD_COUNT = 11;
     private static final int MOUSE_FIELD_COUNT = 15;
 
     private static final int BYTES_PER_FIELD = 8;
@@ -101,16 +101,9 @@ public class AceEventProcessorAosp {
         int actionMasked = event.getActionMasked();
         int actionType = actionMaskedToActionType(actionMasked);
 
-        boolean upOrDown = actionMasked == MotionEvent.ACTION_DOWN || actionMasked == MotionEvent.ACTION_POINTER_DOWN
-                || actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_POINTER_UP;
-        if (upOrDown) {
-            addEventToBuffer(event, event.getActionIndex(), actionType, packet);
-        } else {
-            for (int index = 0; index < pointerCount; index++) {
-                addEventToBuffer(event, index, actionType, packet);
-            }
+        for (int index = 0; index < pointerCount; index++) {
+            addEventToBuffer(event, index, actionType, packet);
         }
-
         // verify the size of packet.
         if (packet.position() % (PONITER_FIELD_COUNT * BYTES_PER_FIELD) != 0) {
             throw new AssertionError("Packet position is not multiple of pointer length");
@@ -136,6 +129,12 @@ public class AceEventProcessorAosp {
         packet.putDouble(event.getSize(actionIndex));
         packet.putLong(eventSourceTransKeySource(event.getSource()));
         packet.putLong(event.getDeviceId());
+        int actionPoint = 1;
+        if ((actionType == ActionType.DOWN || actionType == ActionType.UP) &&
+            actionIndex != event.getActionIndex()) {
+            actionPoint = 0;
+        }
+        packet.putLong(actionPoint);
     }
 
     /**

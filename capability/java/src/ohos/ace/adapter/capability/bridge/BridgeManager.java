@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Huawei Device Co., Ltd.
+ * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -16,9 +16,11 @@
 package ohos.ace.adapter.capability.bridge;
 
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.HashMap;
+import java.util.Iterator;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -162,7 +164,9 @@ public class BridgeManager {
     public static boolean unRegisterBridgeManager(int instanceId) {
         managerMapLock_.lock();
         try {
-            if (managerMap_ != null && managerMap_.remove(instanceId) != null) {
+            if (managerMap_ != null && managerMap_.containsKey(instanceId)) {
+                managerMap_.get(instanceId).release();
+                managerMap_.remove(instanceId);
                 return true;
             } else {
                 ALog.e(LOG_TAG, "unRegisterBridgeManager failed");
@@ -171,6 +175,20 @@ public class BridgeManager {
         } finally {
             managerMapLock_.unlock();
         }
+    }
+
+     /**
+     * release BridgeManager object.
+     *
+     */
+    public void release() {
+        Iterator<HashMap.Entry<String, BridgePlugin>> iterator = this.bridgeMap_.entrySet().iterator();
+        while (iterator.hasNext()) {
+            HashMap.Entry<String, BridgePlugin> entry = iterator.next();
+            entry.getValue().release();
+            iterator.remove();
+        }
+        ALog.i(LOG_TAG, "BridgeManager release.");
     }
 
     /**
@@ -691,14 +709,14 @@ public class BridgeManager {
                 return;
             }
             handler.dispatch(() -> {
-                jsCallMethodBinaryInnter(bridgePlugin, methodName, bufferData);
+                jsCallMethodBinaryInner(bridgePlugin, methodName, bufferData);
             });
         } else {
-            jsCallMethodBinaryInnter(bridgePlugin, methodName, bufferData);
+            jsCallMethodBinaryInner(bridgePlugin, methodName, bufferData);
         }
     }
 
-    private void jsCallMethodBinaryInnter(BridgePlugin bridgePlugin, String methodName, ByteBuffer bufferData) {
+    private void jsCallMethodBinaryInner(BridgePlugin bridgePlugin, String methodName, ByteBuffer bufferData) {
         BridgeErrorCode bridgeErrorCode = BridgeErrorCode.BRIDGE_ERROR_NO;
         if (bridgePlugin.getBridgeType() != BridgeType.BINARY_TYPE) {
             ALog.e(LOG_TAG, "The bridge is not BINARY_TYPE.");
@@ -795,7 +813,7 @@ public class BridgeManager {
             String methodName = methodData.getMethodName();
             Object[] params = methodData.getMethodParameter();
             ByteBuffer buffer = bridgeBinaryCodec_.encodeData(params);
-            nativeplatformCallMethodBinary(bridgeName, methodName, buffer, this.instanceId_);
+            nativePlatformCallMethodBinary(bridgeName, methodName, buffer, this.instanceId_);
         }
         return errorCode;
     }
@@ -835,14 +853,14 @@ public class BridgeManager {
             }
             ByteBuffer copyBufferResult = copyByteBuffer(result);
             handler.dispatch(() -> {
-                jsSendMethodResultBinaryInnter(bridgePlugin, methodName, copyBufferResult, errorCode, errorMessage);
+                jsSendMethodResultBinaryInner(bridgePlugin, methodName, copyBufferResult, errorCode, errorMessage);
             });
         } else {
-            jsSendMethodResultBinaryInnter(bridgePlugin, methodName, result, errorCode, errorMessage);
+            jsSendMethodResultBinaryInner(bridgePlugin, methodName, result, errorCode, errorMessage);
         }
     }
 
-    private void jsSendMethodResultBinaryInnter(BridgePlugin bridgePlugin, String methodName, ByteBuffer result,
+    private void jsSendMethodResultBinaryInner(BridgePlugin bridgePlugin, String methodName, ByteBuffer result,
     int errorCode, String errorMessage) {
         if (bridgePlugin.getBridgeType() != BridgeType.BINARY_TYPE) {
             ALog.e(LOG_TAG, "The bridge is not BINARY_TYPE.");
@@ -868,6 +886,6 @@ public class BridgeManager {
     private native void nativePlatformSendMessageBinary(String bridgeName, ByteBuffer buffer, int instanceId);
     private native void nativePlatformSendMethodResultBinary(String bridgeName, String methodName, ByteBuffer buffer,
         int instanceId, int errorCode, String ErrorMessage);
-    private native void nativeplatformCallMethodBinary(String bridgeName,
+    private native void nativePlatformCallMethodBinary(String bridgeName,
         String methodName, ByteBuffer parameters, int instanceId);
 }
