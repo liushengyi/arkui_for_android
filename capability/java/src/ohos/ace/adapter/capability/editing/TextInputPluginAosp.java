@@ -299,6 +299,8 @@ public class TextInputPluginAosp extends TextInputPluginBase implements TextInpu
             return InputType.TYPE_CLASS_NUMBER;
         } else if (type == TextInputType.PHONE) {
             return InputType.TYPE_CLASS_PHONE;
+        } else if (type == TextInputType.NUMBER_PASSWORD) {
+            return InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD;
         } else {
             ALog.d(LOG_TAG, "other text input type");
         }
